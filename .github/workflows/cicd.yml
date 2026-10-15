@@ -11,7 +11,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -39,13 +39,39 @@ jobs:
           # 扫描主机密钥（指定端口）
           ssh-keyscan -p 49498 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
           echo "SSH环境配置完成，尝试连接服务器..."
+
+          # 打包本次提交的完整代码，通过SSH直传服务器备用
+          #（头歌服务器直连GitHub不稳定，git pull超时时改用该代码包，效果与git pull一致）
+          git bundle create /tmp/deploy.bundle main
+          cat /tmp/deploy.bundle | ssh -p 49498 root@${{ secrets.TOUGE_SERVER_IP }} "cat > /tmp/deploy.bundle"
+
           # 连接服务器执行部署（添加-o选项兼容旧版SSH）
           ssh -v -p 49498 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa root@${{ secrets.TOUGE_SERVER_IP }} << 'EOF'
             set -e
             echo "成功连接服务器：$(whoami)@$(hostname)"
 
             cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
-            git pull origin main || { echo "Git拉取失败"; exit 1; }
+
+            # 优先按教程从GitHub拉取（快速失败，最多重试1次）
+            export GIT_HTTP_LOW_SPEED_LIMIT=2000
+            export GIT_HTTP_LOW_SPEED_TIME=20
+            PULLED=0
+            if git pull origin main; then
+              PULLED=1
+            else
+              echo "服务器直连GitHub失败，5秒后重试..."
+              sleep 5
+              if git pull origin main; then
+                PULLED=1
+              fi
+            fi
+
+            if [ "$PULLED" = "1" ]; then
+              echo "已从GitHub拉取最新代码"
+            else
+              echo "改用Actions直传的代码包部署（与git pull结果一致）"
+              git pull /tmp/deploy.bundle main
+            fi
 
             pip3 install --upgrade pip
             pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
